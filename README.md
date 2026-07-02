@@ -53,11 +53,20 @@ lib/
 
 ### Mini-app bridge
 
-Ported from the web `src/bridge/protocol.ts`. Injected JS forwards the mini-app's
-`postMessage` envelopes (`{channel:'sc-wallet-bridge', payload}`) to a Dart
-`JavaScriptChannel`; Dart dispatches `getContext` / `prepare` / `pay` and posts
-the `{id, ok, result}` response back into the page. `pay` shows the consent
-bottom sheet and only pays if the user confirms.
+The mini-app SDK decides it is "hosted in a wallet shell" purely by
+`window.parent !== window`, sends via `window.parent.postMessage`, and accepts a
+reply only when `ev.source === window.parent`. A single WebView has no parent
+frame, so a **document-start UserScript** (`flutter_inappwebview`) installs a
+synthetic parent — a hidden same-origin iframe's `contentWindow`, a real Window
+the engine accepts as a `MessageEvent.source` — and points `window.parent`/`top`
+at it. Its `postMessage` forwards requests (`{channel:'sc-wallet-bridge',
+payload}`) to a Dart handler; Dart dispatches `getContext` / `prepare` / `pay`
+and delivers the `{id, ok, result}` reply as a MessageEvent whose `source` is
+that window. `pay` shows the consent bottom sheet and only pays if confirmed.
+
+The UserScript must run at **document start** (before the mini-app bundle runs
+its host check), which is why this uses `flutter_inappwebview` rather than
+`webview_flutter` (the latter injects only after page load).
 
 ## Run
 

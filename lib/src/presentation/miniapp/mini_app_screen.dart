@@ -1,7 +1,8 @@
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../core/config/app_config.dart';
 import '../../data/repositories/wallet_repository.dart';
@@ -41,11 +42,11 @@ class MiniAppScreen extends StatefulWidget {
 }
 
 class _MiniAppScreenState extends State<MiniAppScreen> {
-  late final WebViewController _controller;
+  InAppWebViewController? _controller;
   String _encUserId = '';
-  bool _ready = false;
   bool _paid = false;
   String? _error;
+  bool _bootstrapping = true;
 
   @override
   void initState() {
@@ -54,7 +55,7 @@ class _MiniAppScreenState extends State<MiniAppScreen> {
   }
 
   Future<void> _bootstrap() async {
-    // Precompute the sealed user id BEFORE loading the page, so getContext can
+    // Precompute the sealed user id BEFORE the page loads, so getContext can
     // answer immediately.
     try {
       _encUserId = await widget.repo.encUserIdFor(
@@ -65,30 +66,16 @@ class _MiniAppScreenState extends State<MiniAppScreen> {
       if (mounted) setState(() => _error = 'Failed to open service: $e');
       return;
     }
-
-    final controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(AppColors.backgroundPrimary)
-      ..addJavaScriptChannel(Bridge.jsChannel, onMessageReceived: _onBridgeMessage)
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageFinished: (_) => _controller.runJavaScript(Bridge.injectedJs),
-        ),
-      )
-      ..loadRequest(Uri.parse(widget.url.isEmpty ? AppConfig.fallbackMiniAppUrl : widget.url));
-
-    setState(() {
-      _controller = controller;
-      _ready = true;
-    });
+    if (mounted) setState(() => _bootstrapping = false);
   }
 
   // A bridge request arrived from the mini-app. Dispatch, then deliver the
   // response back into the page keyed by the request id.
-  Future<void> _onBridgeMessage(JavaScriptMessage message) async {
+  Future<void> _onBridgeCall(List<dynamic> args) async {
+    if (args.isEmpty) return;
     Map<String, dynamic> req;
     try {
-      req = jsonDecode(message.message) as Map<String, dynamic>;
+      req = jsonDecode(args.first as String) as Map<String, dynamic>;
     } catch (_) {
       return;
     }
@@ -143,36 +130,57 @@ class _MiniAppScreenState extends State<MiniAppScreen> {
       v is Map<String, dynamic> ? v : <String, dynamic>{};
 
   Future<void> _deliver(Map<String, dynamic> response) async {
-    // Pass the JSON as a single-quoted JS string argument (escape for safety).
-    final json = jsonEncode(response);
-    final escaped = jsonEncode(json); // double-encode -> a JS string literal
-    await _controller.runJavaScript('window.__scDeliver($escaped);');
+    final controller = _controller;
+    if (controller == null) return;
+    // Pass the JSON as a single-quoted JS string argument (double-encode -> a JS
+    // string literal), then let the injected __scDeliver dispatch it.
+    final arg = jsonEncode(jsonEncode(response));
+    await controller.evaluateJavascript(source: 'window.__scDeliver($arg);');
   }
 
   @override
   Widget build(BuildContext context) {
-    return PopScope(
-      // Report whether a payment happened so the cabinet refreshes on return.
-      onPopInvokedWithResult: (didPop, _) {},
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(widget.title),
-          leading: IconButton(
-            icon: const Icon(Icons.close),
-            onPressed: () => Navigator.of(context).pop(_paid),
-          ),
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.title),
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: () => Navigator.of(context).pop(_paid),
         ),
-        body: _error != null
-            ? Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Text(_error!, style: const TextStyle(color: AppColors.accentRed)),
-                ),
-              )
-            : (_ready
-                ? WebViewWidget(controller: _controller)
-                : const Center(child: CircularProgressIndicator())),
       ),
+      body: _error != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(_error!, style: const TextStyle(color: AppColors.accentRed)),
+              ),
+            )
+          : (_bootstrapping
+              ? const Center(child: CircularProgressIndicator())
+              : InAppWebView(
+                  initialUrlRequest: URLRequest(
+                    url: WebUri(widget.url.isEmpty ? AppConfig.fallbackMiniAppUrl : widget.url),
+                  ),
+                  initialSettings: InAppWebViewSettings(
+                    javaScriptEnabled: true,
+                    transparentBackground: true,
+                  ),
+                  // Install the bridge at document start, before the mini-app's
+                  // bundle runs its `window.parent === window` host check.
+                  initialUserScripts: UnmodifiableListView<UserScript>([
+                    UserScript(
+                      source: Bridge.installJs,
+                      injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                    ),
+                  ]),
+                  onWebViewCreated: (controller) {
+                    _controller = controller;
+                    controller.addJavaScriptHandler(
+                      handlerName: Bridge.handler,
+                      callback: (args) => _onBridgeCall(args),
+                    );
+                  },
+                )),
     );
   }
 }

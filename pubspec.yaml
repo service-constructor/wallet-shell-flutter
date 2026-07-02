@@ -45,7 +45,10 @@ dependencies:
   flutter_secure_storage: ^10.0.0
 
   # Mini-app host: embeds each mini-app in a WebView and bridges it to the shell.
-  webview_flutter: ^4.10.0
+  # flutter_inappwebview (not webview_flutter) because we need a document-start
+  # UserScript to install the bridge BEFORE the mini-app bundle runs its
+  # synchronous `window.parent === window` host check.
+  flutter_inappwebview: ^6.1.5
 
   # X25519 sealed box (crypto_box_seal) to encrypt the user id for a mini-app.
   pinenacl: ^0.6.0
